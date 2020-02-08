@@ -31,6 +31,7 @@ define(function (require, exports, module) {
         CommandManager      = require("command/CommandManager"),
         Commands            = require("command/Commands"),
         DeprecationWarning  = require("utils/DeprecationWarning"),
+        EventDispatcher     = require("utils/EventDispatcher"),
         ProjectManager      = require("project/ProjectManager"),
         DocumentManager     = require("document/DocumentManager"),
         MainViewManager     = require("view/MainViewManager"),
@@ -55,6 +56,7 @@ define(function (require, exports, module) {
         UrlParams           = require("utils/UrlParams").UrlParams,
         StatusBar           = require("widgets/StatusBar"),
         WorkspaceManager    = require("view/WorkspaceManager"),
+        LanguageManager     = require("language/LanguageManager"),
         _                   = require("thirdparty/lodash");
 
     /**
@@ -134,7 +136,14 @@ define(function (require, exports, module) {
     PreferencesManager.definePreference("defaultExtension", "string", "", {
         excludeFromHints: true
     });
+    EventDispatcher.makeEventDispatcher(exports);
 
+    /**
+     * Event triggered when File Save is cancelled, when prompted to save dirty files
+     */
+    var APP_QUIT_CANCELLED = "appQuitCancelled";
+
+    
     /**
      * JSLint workaround for circular dependency
      * @type {function}
@@ -148,7 +157,9 @@ define(function (require, exports, module) {
     function _updateTitle() {
         var currentDoc          = DocumentManager.getCurrentDocument(),
             windowTitle         = brackets.config.app_title,
-            currentlyViewedPath = MainViewManager.getCurrentlyViewedPath(MainViewManager.ACTIVE_PANE);
+            currentlyViewedFile = MainViewManager.getCurrentlyViewedFile(MainViewManager.ACTIVE_PANE),
+            currentlyViewedPath = currentlyViewedFile && currentlyViewedFile.fullPath,
+            readOnlyString      = (currentlyViewedFile && currentlyViewedFile.readOnly) ? "[Read Only] - " : "";
 
         if (!brackets.nativeMenus) {
             if (currentlyViewedPath) {
@@ -188,7 +199,7 @@ define(function (require, exports, module) {
             var projectName = projectRoot.name;
             // Construct shell/browser window title, e.g. "• index.html (myProject) — Brackets"
             if (currentlyViewedPath) {
-                windowTitle = StringUtils.format(WINDOW_TITLE_STRING_DOC, _currentTitlePath, projectName, brackets.config.app_title);
+                windowTitle = StringUtils.format(WINDOW_TITLE_STRING_DOC, readOnlyString + _currentTitlePath, projectName, brackets.config.app_title);
                 // Display dirty dot when there are unsaved changes
                 if (currentDoc && currentDoc.isDirty) {
                     windowTitle = "• " + windowTitle;
@@ -321,6 +332,22 @@ define(function (require, exports, module) {
             });
 
             var file = FileSystem.getFileForPath(fullPath);
+            if (options && options.encoding) {
+                file._encoding = options.encoding;
+            } else {
+                var projectRoot = ProjectManager.getProjectRoot(),
+                    context = {
+                        location : {
+                            scope: "user",
+                            layer: "project",
+                            layerID: projectRoot.fullPath
+                        }
+                    };
+                var encoding = PreferencesManager.getViewState("encoding", context);
+                if (encoding && encoding[fullPath]) {
+                    file._encoding = encoding[fullPath];
+                }
+            }
             MainViewManager._open(paneId, file, options)
                 .done(function () {
                     result.resolve(file);
@@ -450,7 +477,7 @@ define(function (require, exports, module) {
 
         _doOpenWithOptionalPath(fileInfo.path, silent, paneId, commandData && commandData.options)
             .done(function (file) {
-                HealthLogger.fileOpened(fileInfo.path);
+                HealthLogger.fileOpened(file._path, false, file._encoding);
                 if (!commandData || !commandData.options || !commandData.options.noPaneActivate) {
                     MainViewManager.setActivePaneId(paneId);
                 }
@@ -625,10 +652,8 @@ define(function (require, exports, module) {
         // If a file is currently selected in the tree, put it next to it.
         // If a directory is currently selected in the tree, put it in it.
         // If an Untitled document is selected or nothing is selected in the tree, put it at the root of the project.
-        // (Note: 'selected' may be an item that's selected in the workingset and not the tree; but in that case
-        // ProjectManager.createNewItem() ignores the baseDir we give it and falls back to the project root on its own)
         var baseDirEntry,
-            selected = ProjectManager.getSelectedItem();
+            selected = ProjectManager.getFileTreeContext();
         if ((!selected) || (selected instanceof InMemoryFile)) {
             selected = ProjectManager.getProjectRoot();
         }
@@ -663,6 +688,15 @@ define(function (require, exports, module) {
 
         var doc = DocumentManager.createUntitledDocument(_nextUntitledIndexToUse++, defaultExtension);
         MainViewManager._edit(MainViewManager.ACTIVE_PANE, doc);
+
+        HealthLogger.sendAnalyticsData(
+            HealthLogger.commonStrings.USAGE +
+            HealthLogger.commonStrings.FILE_OPEN +
+            HealthLogger.commonStrings.FILE_NEW,
+            HealthLogger.commonStrings.USAGE,
+            HealthLogger.commonStrings.FILE_OPEN,
+            HealthLogger.commonStrings.FILE_NEW
+        );
 
         return new $.Deferred().resolve(doc).promise();
     }
@@ -763,6 +797,7 @@ define(function (require, exports, module) {
                 .done(function () {
                     docToSave.notifySaved();
                     result.resolve(file);
+                    HealthLogger.fileSaved(docToSave);
                 })
                 .fail(function (err) {
                     if (err === FileSystemError.CONTENTS_MODIFIED) {
@@ -832,6 +867,14 @@ define(function (require, exports, module) {
 
         return result.promise();
     }
+    
+    /**
+     * Dispatches the app quit cancelled event
+     */
+    function dispatchAppQuitCancelledEvent() {
+        exports.trigger(exports.APP_QUIT_CANCELLED);
+    }
+
 
     /**
      * Opens the native OS save as dialog and saves document.
@@ -901,7 +944,21 @@ define(function (require, exports, module) {
             doc.isSaving = true;    // mark that we're saving the document
 
             // First, write document's current text to new file
+            if (doc.file._encoding && doc.file._encoding !== "UTF-8") {
+                var projectRoot = ProjectManager.getProjectRoot(),
+                    context = {
+                        location : {
+                            scope: "user",
+                            layer: "project",
+                            layerID: projectRoot.fullPath
+                        }
+                    };
+                var encoding = PreferencesManager.getViewState("encoding", context);
+                encoding[path] = doc.file._encoding;
+                PreferencesManager.setViewState("encoding", encoding, context);
+            }
             newFile = FileSystem.getFileForPath(path);
+            newFile._encoding = doc.file._encoding;
 
             // Save as warns you when you're about to overwrite a file, so we
             // explicitly allow "blind" writes to the filesystem in this case,
@@ -920,6 +977,7 @@ define(function (require, exports, module) {
                     } else {
                         openNewFile();
                     }
+                    HealthLogger.fileSaved(doc);
                 })
                 .fail(function (error) {
                     _showSaveFileError(error, path)
@@ -952,11 +1010,22 @@ define(function (require, exports, module) {
                 saveAsDefaultPath = FileUtils.getDirectoryPath(origPath);
             }
             defaultName = FileUtils.getBaseName(origPath);
+            var file = FileSystem.getFileForPath(origPath);
+            if (file instanceof InMemoryFile) {
+                var language = LanguageManager.getLanguageForPath(origPath);
+                if (language) {
+                    var fileExtensions = language.getFileExtensions();
+                    if (fileExtensions && fileExtensions.length > 0) {
+                        defaultName += "." + fileExtensions[0];
+                    }
+                }
+            }
             FileSystem.showSaveDialog(Strings.SAVE_FILE_AS, saveAsDefaultPath, defaultName, function (err, selectedPath) {
                 if (!err) {
                     if (selectedPath) {
                         _doSaveAfterSaveDialog(selectedPath);
                     } else {
+                        dispatchAppQuitCancelledEvent();
                         result.reject(USER_CANCELED);
                     }
                 } else {
@@ -1128,6 +1197,7 @@ define(function (require, exports, module) {
         function doClose(file) {
             if (!promptOnly) {
                 MainViewManager._close(paneId, file);
+                HealthLogger.fileClosed(file);
             }
         }
 
@@ -1178,6 +1248,7 @@ define(function (require, exports, module) {
             )
                 .done(function (id) {
                     if (id === Dialogs.DIALOG_BTN_CANCEL) {
+                        dispatchAppQuitCancelledEvent();
                         result.reject();
                     } else if (id === Dialogs.DIALOG_BTN_OK) {
                         // "Save" case: wait until we confirm save has succeeded before closing
@@ -1283,6 +1354,7 @@ define(function (require, exports, module) {
             )
                 .done(function (id) {
                     if (id === Dialogs.DIALOG_BTN_CANCEL) {
+                        dispatchAppQuitCancelledEvent();
                         result.reject();
                     } else if (id === Dialogs.DIALOG_BTN_OK) {
                         // Save all unsaved files, then if that succeeds, close all
@@ -1570,28 +1642,31 @@ define(function (require, exports, module) {
         if (brackets.inBrowser) {
             result.resolve();
         } else {
-            var port = brackets.app.getRemoteDebuggingPort ? brackets.app.getRemoteDebuggingPort() : 9234;
-            Inspector.getDebuggableWindows("127.0.0.1", port)
-                .fail(result.reject)
-                .done(function (response) {
-                    var page = response[0];
-                    if (!page || !page.webSocketDebuggerUrl) {
-                        result.reject();
-                        return;
-                    }
-                    var _socket = new WebSocket(page.webSocketDebuggerUrl);
-                    // Disable the cache
-                    _socket.onopen = function _onConnect() {
-                        _socket.send(JSON.stringify({ id: 1, method: "Network.setCacheDisabled", params: { "cacheDisabled": true } }));
-                    };
-                    // The first message will be the confirmation => disconnected to allow remote debugging of Brackets
-                    _socket.onmessage = function _onMessage(e) {
-                        _socket.close();
-                        result.resolve();
-                    };
-                    // In case of an error
-                    _socket.onerror = result.reject;
-                });
+            brackets.app.getRemoteDebuggingPort(function (err, port){
+                if ((!err) && port && port > 0) {
+                    Inspector.getDebuggableWindows("127.0.0.1", port)
+                        .fail(result.reject)
+                        .done(function (response) {
+                            var page = response[0];
+                            if (!page || !page.webSocketDebuggerUrl) {
+                                result.reject();
+                                return;
+                            }
+                            var _socket = new WebSocket(page.webSocketDebuggerUrl);
+                            // Disable the cache
+                            _socket.onopen = function _onConnect() {
+                                _socket.send(JSON.stringify({ id: 1, method: "Network.setCacheDisabled", params: { "cacheDisabled": true } }));
+                            };
+                            // The first message will be the confirmation => disconnected to allow remote debugging of Brackets
+                            _socket.onmessage = function _onMessage(e) {
+                                _socket.close();
+                                result.resolve();
+                            };
+                            // In case of an error
+                            _socket.onerror = result.reject;
+                        });
+                }
+            });
         }
 
         return result.promise();
@@ -1680,6 +1755,33 @@ define(function (require, exports, module) {
     /** Reload Without Extensions commnad handler **/
     var handleReloadWithoutExts = _.partial(handleReload, true);
 
+    /**
+     * Attach a beforeunload handler to notify user about unsaved changes and URL redirection in CEF.
+     * Prevents data loss in scenario reported under #13708
+     * Make sure we don't attach this handler if the current window is actually a test window
+    **/
+
+    var isTestWindow = (new window.URLSearchParams(window.location.search || "")).get("testEnvironment");
+    if (!isTestWindow) {
+        window.onbeforeunload = function(e) {
+            var openDocs = DocumentManager.getAllOpenDocuments();
+
+            // Detect any unsaved changes
+            openDocs = openDocs.filter(function(doc) {
+                return doc && doc.isDirty;
+            });
+
+            // Ensure we are not in normal app-quit or reload workflow
+            if (!_isReloading && !_windowGoingAway) {
+                if (openDocs.length > 0) {
+                    return Strings.WINDOW_UNLOAD_WARNING_WITH_UNSAVED_CHANGES;
+                } else {
+                    return Strings.WINDOW_UNLOAD_WARNING;
+                }
+            }
+        };
+    }
+
     /** Do some initialization when the DOM is ready **/
     AppInit.htmlReady(function () {
         // If in Reload Without User Extensions mode, update UI and log console message
@@ -1718,6 +1820,8 @@ define(function (require, exports, module) {
 
     // Define public API
     exports.showFileOpenError = showFileOpenError;
+    exports.APP_QUIT_CANCELLED = APP_QUIT_CANCELLED;
+    
 
     // Deprecated commands
     CommandManager.register(Strings.CMD_ADD_TO_WORKING_SET,          Commands.FILE_ADD_TO_WORKING_SET,        handleFileAddToWorkingSet);

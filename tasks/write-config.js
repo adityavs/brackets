@@ -31,9 +31,23 @@ module.exports = function (grunt) {
 
     // task: write-config
     grunt.registerTask("write-config", "Merge package.json and src/brackets.config.json into src/config.json", function () {
-        var packageJSON = grunt.file.readJSON("package.json"),
-            appConfigJSON = grunt.file.readJSON("src/brackets.config.json");
+        var name = "dev";
+        if (this.flags.dist === true) {
+            name = "dist";
+        } else if (this.flags.prerelease === true) {
+            name = "prerelease";
+        }
 
+        var appConfigJSON = grunt.file.readJSON("src/brackets.config.json"),
+            appConfigEnvJSON = grunt.file.readJSON("src/brackets.config." + name + ".json"),
+            key;
+        for (key in appConfigEnvJSON) {
+            if (appConfigEnvJSON.hasOwnProperty(key)) {
+                appConfigJSON.config[key] = appConfigEnvJSON[key];
+            }
+        }
+
+        var packageJSON = grunt.file.readJSON("package.json");
         Object.keys(packageJSON).forEach(function (key) {
             if (appConfigJSON[key] === undefined) {
                 appConfigJSON[key] = packageJSON[key];
@@ -49,6 +63,7 @@ module.exports = function (grunt) {
             distConfig = grunt.file.readJSON("src/config.json");
 
         build.getGitInfo(process.cwd()).then(function (gitInfo) {
+            distConfig.buildnumber = gitInfo.commits;
             distConfig.version = distConfig.version.substr(0, distConfig.version.lastIndexOf("-") + 1) + gitInfo.commits;
             distConfig.repository.SHA = gitInfo.sha;
             distConfig.repository.branch = gitInfo.branch;

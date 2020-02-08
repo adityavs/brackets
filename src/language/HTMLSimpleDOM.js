@@ -82,7 +82,7 @@ define(function (require, exports, module) {
         rtc     : { rb: true, rt: true, rtc: true, rp: true },
         optgroup: { optgroup: true, option: true },
         option  : { option: true },
-        tbody   : { caption: true, colgroup: true, thead: true, tbody: true, tfoot: true, },
+        tbody   : { caption: true, colgroup: true, thead: true, tbody: true, tfoot: true },
         tfoot   : { caption: true, colgroup: true, thead: true, tbody: true },
         thead   : { caption: true, colgroup: true },
         tr      : { tr: true, th: true, td: true, caption: true },
@@ -301,7 +301,7 @@ define(function (require, exports, module) {
      */
     Builder.prototype.build = function (strict, markCache) {
         var self = this;
-        var token, lastClosedTag, lastTextNode, lastIndex = 0;
+        var token, lastClosedTag, lastTextNode;
         var stack = this.stack;
         var attributeName = null;
         var nodeMap = {};
@@ -479,7 +479,6 @@ define(function (require, exports, module) {
                     newNode.update();
                 }
             }
-            lastIndex = token.end;
         }
 
         // If we have any tags hanging open, fail the parse if we're in strict mode,

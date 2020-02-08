@@ -93,6 +93,7 @@ define(function (require, exports, module) {
         Commands            = require("command/Commands"),
         PerfUtils           = require("utils/PerfUtils"),
         LanguageManager     = require("language/LanguageManager"),
+        ProjectManager      = require("project/ProjectManager"),
         Strings             = require("strings");
 
 
@@ -322,33 +323,33 @@ define(function (require, exports, module) {
      * If all you need is the Document's getText() value, use the faster getDocumentText() instead.
      *
      * @param {!string} fullPath
+     * @param {!object} fileObj actual File|RemoteFile or some other protocol adapter handle
      * @return {$.Promise} A promise object that will be resolved with the Document, or rejected
      *      with a FileSystemError if the file is not yet open and can't be read from disk.
      */
-    function getDocumentForPath(fullPath) {
+    function getDocumentForPath(fullPath, fileObj) {
         var doc = getOpenDocumentForPath(fullPath);
 
         if (doc) {
             // use existing document
             return new $.Deferred().resolve(doc).promise();
         } else {
+            var result = new $.Deferred(),
+                promise = result.promise();
 
-            // Should never get here if the fullPath refers to an Untitled document
+            // return null in case of untitled documents
             if (fullPath.indexOf(_untitledDocumentPath) === 0) {
-                console.error("getDocumentForPath called for non-open untitled document: " + fullPath);
-                return new $.Deferred().reject().promise();
+                result.resolve(null);
+                return promise;
             }
 
-            var file            = FileSystem.getFileForPath(fullPath),
+            var file            = fileObj || FileSystem.getFileForPath(fullPath),
                 pendingPromise  = getDocumentForPath._pendingDocumentPromises[file.id];
 
             if (pendingPromise) {
                 // wait for the result of a previous request
                 return pendingPromise;
             } else {
-                var result = new $.Deferred(),
-                    promise = result.promise();
-
                 // log this document's Promise as pending
                 getDocumentForPath._pendingDocumentPromises[file.id] = promise;
 
@@ -387,7 +388,7 @@ define(function (require, exports, module) {
      * Document promises that are waiting to be resolved. It is possible for multiple clients
      * to request the same document simultaneously before the initial request has completed.
      * In particular, this happens at app startup where the working set is created and the
-     * intial active document is opened in an editor. This is essential to ensure that only
+     * initial active document is opened in an editor. This is essential to ensure that only
      * one Document exists for any File.
      * @private
      * @type {Object.<string, $.Promise>}
@@ -420,7 +421,7 @@ define(function (require, exports, module) {
         if (doc) {
             result.resolve(doc.getText(), doc.diskTimestamp, checkLineEndings ? doc._lineEndings : null);
         } else {
-            file.read(function (err, contents, stat) {
+            file.read(function (err, contents, encoding, stat) {
                 if (err) {
                     result.reject(err);
                 } else {
@@ -498,6 +499,18 @@ define(function (require, exports, module) {
         //  the user to save any unsaved changes and then calls us back
         //  via notifyFileDeleted
         FileSyncManager.syncOpenDocuments(Strings.FILE_DELETED_TITLE);
+
+        var projectRoot = ProjectManager.getProjectRoot(),
+            context = {
+                location : {
+                    scope: "user",
+                    layer: "project",
+                    layerID: projectRoot.fullPath
+                }
+            };
+        var encoding = PreferencesManager.getViewState("encoding", context);
+        delete encoding[fullPath];
+        PreferencesManager.setViewState("encoding", encoding, context);
 
         if (!getOpenDocumentForPath(fullPath) &&
                 !MainViewManager.findInAllWorkingSets(fullPath).length) {

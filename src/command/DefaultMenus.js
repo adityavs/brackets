@@ -30,7 +30,37 @@ define(function (require, exports, module) {
     var AppInit         = require("utils/AppInit"),
         Commands        = require("command/Commands"),
         Menus           = require("command/Menus"),
-        Strings         = require("strings");
+        Strings         = require("strings"),
+        MainViewManager = require("view/MainViewManager"),
+        CommandManager  = require("command/CommandManager");
+
+    /**
+     * Disables menu items present in items if enabled is true.
+     * enabled is true if file is saved and present on user system.
+     * @param {boolean} enabled
+     * @param {array} items
+     */
+    function _setContextMenuItemsVisible(enabled, items) {
+        items.forEach(function (item) {
+            CommandManager.get(item).setEnabled(enabled);
+        });
+    }
+    
+    /**
+     * Checks if file saved and present on system and
+     * disables menu items accordingly
+     */
+    function _setMenuItemsVisible() {
+        var file = MainViewManager.getCurrentlyViewedFile(MainViewManager.ACTIVE_PANE);
+        if (file) {
+            file.exists(function (err, isPresent) {
+                if (err) {
+                    return err;
+                }
+                _setContextMenuItemsVisible(isPresent, [Commands.FILE_RENAME, Commands.NAVIGATE_SHOW_IN_FILE_TREE, Commands.NAVIGATE_SHOW_IN_OS]);   
+            });
+        }
+    }
 
     AppInit.htmlReady(function () {
         /*
@@ -106,6 +136,7 @@ define(function (require, exports, module) {
         menu.addMenuItem(Commands.CMD_SKIP_CURRENT_MATCH);
         menu.addMenuDivider();
         menu.addMenuItem(Commands.CMD_FIND_IN_FILES);
+        menu.addMenuItem(Commands.CMD_FIND_ALL_REFERENCES);
         menu.addMenuDivider();
         menu.addMenuItem(Commands.CMD_REPLACE);
         menu.addMenuItem(Commands.CMD_REPLACE_IN_FILES);
@@ -121,6 +152,7 @@ define(function (require, exports, module) {
         menu.addMenuItem(Commands.CMD_SPLITVIEW_HORIZONTAL);
         menu.addMenuDivider();
         menu.addMenuItem(Commands.VIEW_HIDE_SIDEBAR);
+        menu.addMenuItem(Commands.TOGGLE_SEARCH_AUTOHIDE);
         menu.addMenuDivider();
         menu.addMenuItem(Commands.VIEW_INCREASE_FONT_SIZE);
         menu.addMenuItem(Commands.VIEW_DECREASE_FONT_SIZE);
@@ -141,6 +173,7 @@ define(function (require, exports, module) {
         menu.addMenuItem(Commands.NAVIGATE_QUICK_OPEN);
         menu.addMenuItem(Commands.NAVIGATE_GOTO_LINE);
         menu.addMenuItem(Commands.NAVIGATE_GOTO_DEFINITION);
+        menu.addMenuItem(Commands.NAVIGATE_GOTO_DEFINITION_PROJECT);
         menu.addMenuItem(Commands.NAVIGATE_JUMPTO_DEFINITION);
         menu.addMenuItem(Commands.NAVIGATE_GOTO_FIRST_PROBLEM);
         menu.addMenuDivider();
@@ -251,6 +284,7 @@ define(function (require, exports, module) {
         // editor_cmenu.addMenuItem(Commands.NAVIGATE_JUMPTO_DEFINITION);
         editor_cmenu.addMenuItem(Commands.TOGGLE_QUICK_EDIT);
         editor_cmenu.addMenuItem(Commands.TOGGLE_QUICK_DOCS);
+        editor_cmenu.addMenuItem(Commands.CMD_FIND_ALL_REFERENCES);
         editor_cmenu.addMenuDivider();
         editor_cmenu.addMenuItem(Commands.EDIT_CUT);
         editor_cmenu.addMenuItem(Commands.EDIT_COPY);
@@ -340,5 +374,9 @@ define(function (require, exports, module) {
                 $(this).addClass("open");
             }
         });
+        // Check the visibility of context menu items before opening the context menu.
+        // 'Rename', 'Show in file tree' and 'Show in explorer' items will be disabled for files that have not yet been saved to disk.
+        Menus.getContextMenu(Menus.ContextMenuIds.WORKING_SET_CONTEXT_MENU).on("beforeContextMenuOpen", _setMenuItemsVisible);        
+        Menus.getContextMenu(Menus.ContextMenuIds.PROJECT_MENU).on("beforeContextMenuOpen", _setMenuItemsVisible);
     });
 });

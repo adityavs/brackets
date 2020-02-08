@@ -94,7 +94,10 @@ define(function LiveDevelopment(require, exports, module) {
         ProjectManager       = require("project/ProjectManager"),
         Strings              = require("strings"),
         StringUtils          = require("utils/StringUtils"),
-        UserServer           = require("LiveDevelopment/Servers/UserServer").UserServer;
+        UserServer           = require("LiveDevelopment/Servers/UserServer").UserServer,
+        WebSocketTransport   = require("LiveDevelopment/transports/WebSocketTransport"),
+        PreferencesManager   = require("preferences/PreferencesManager"),
+        HealthLogger         = require("utils/HealthLogger");
 
     // Inspector
     var Inspector       = require("LiveDevelopment/Inspector/Inspector");
@@ -195,6 +198,14 @@ define(function LiveDevelopment(require, exports, module) {
      * Handles of registered servers
      */
     var _regServers = [];
+    
+    PreferencesManager.definePreference("livedev.wsPort", "number", 8125, {
+        description: Strings.DESCRIPTION_LIVEDEV_WEBSOCKET_PORT
+    });
+    
+    PreferencesManager.definePreference("livedev.enableReverseInspect", "boolean", true, {
+        description: Strings.DESCRIPTION_LIVEDEV_ENABLE_REVERSE_INSPECT
+    });
 
     function _isPromisePending(promise) {
         return promise && promise.state() === "pending";
@@ -849,6 +860,7 @@ define(function LiveDevelopment(require, exports, module) {
      * @return {jQuery.Promise} Always return a resolved promise once the connection is closed
      */
     function _close(doCloseWindow, reason) {
+        WebSocketTransport.closeWebSocketServer();
         if (_closeDeferred) {
             return _closeDeferred;
         } else {
@@ -1339,6 +1351,13 @@ define(function LiveDevelopment(require, exports, module) {
                 });
             }
         }
+        // Send analytics data when Live Preview is opened
+        HealthLogger.sendAnalyticsData(
+            "livePreviewOpen",
+            "usage",
+            "livePreview",
+            "open"
+        );
 
         // Register user defined server provider and keep handlers for further clean-up
         _regServers.push(LiveDevServerManager.registerServer({ create: _createUserServer }, 99));
@@ -1362,6 +1381,12 @@ define(function LiveDevelopment(require, exports, module) {
             // wait for server (StaticServer, Base URL or file:)
             prepareServerPromise
                 .done(function () {
+                    var reverseInspectPref = PreferencesManager.get("livedev.enableReverseInspect"),
+                        wsPort             = PreferencesManager.get("livedev.wsPort");
+                        
+                    if (wsPort && reverseInspectPref) {
+                        WebSocketTransport.createWebSocketServer(wsPort);
+                    }
                     _doLaunchAfterServerReady(doc);
                 })
                 .fail(function () {

@@ -41,7 +41,16 @@ define(function (require, exports, module) {
     // inside Node for CI testing) we use this trick to get the global object.
     var Fn = Function, global = (new Fn("return this"))();
     if (!global.brackets) {
-        global.brackets = {};
+
+        // Earlier brackets object was initialized at 
+        // https://github.com/adobe/brackets-shell/blob/908ed1503995c1b5ae013473c4b181a9aa64fd22/appshell/appshell_extensions.js#L945.
+        // With the newer versions of CEF, the initialization was crashing the render process, citing
+        // JS eval error. So moved the brackets object initialization from appshell_extensions.js to here.
+        if (global.appshell) {
+            global.brackets = global.appshell;
+        } else {
+            global.brackets = {};
+        }
     }
 
     // Parse URL params
@@ -74,6 +83,24 @@ define(function (require, exports, module) {
         global.brackets.platform = "win";
     }
 
+    // Expose platform info for build applicability consumption
+    global.brackets.getPlatformInfo = function () {
+        var OS = "";
+
+        if (/Windows|Win32|WOW64|Win64/.test(window.navigator.userAgent)) {
+            OS = "WIN";
+        } else if (/Mac/.test(window.navigator.userAgent)) {
+            OS = "OSX";
+        } else if (/Linux|X11/.test(window.navigator.userAgent)) {
+            OS = "LINUX32";
+            if (/x86_64/.test(window.navigator.appVersion + window.navigator.userAgent)) {
+                OS = "LINUX64";
+            }
+        }
+
+        return OS;
+    };
+
     global.brackets.inBrowser = !global.brackets.hasOwnProperty("fs");
 
     // Are we in a desktop shell with a native menu bar?
@@ -81,7 +108,7 @@ define(function (require, exports, module) {
     if (hasNativeMenus) {
         global.brackets.nativeMenus = (hasNativeMenus === "true");
     } else {
-        global.brackets.nativeMenus = (!global.brackets.inBrowser && (global.brackets.platform !== "linux"));
+        global.brackets.nativeMenus = (!global.brackets.inBrowser);
     }
 
     // Locale-related APIs

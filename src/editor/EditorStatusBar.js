@@ -40,10 +40,25 @@ define(function (require, exports, module) {
         PreferencesManager   = require("preferences/PreferencesManager"),
         StatusBar            = require("widgets/StatusBar"),
         Strings              = require("strings"),
-        StringUtils          = require("utils/StringUtils");
+        FileUtils            = require("file/FileUtils"),
+        InMemoryFile         = require("document/InMemoryFile"),
+        Dialogs              = require("widgets/Dialogs"),
+        DefaultDialogs       = require("widgets/DefaultDialogs"),
+        ProjectManager       = require("project/ProjectManager"),
+        Async                = require("utils/Async"),
+        FileSystem           = require("filesystem/FileSystem"),
+        CommandManager       = require("command/CommandManager"),
+        Commands             = require("command/Commands"),
+        DocumentManager      = require("document/DocumentManager"),
+        StringUtils          = require("utils/StringUtils"),
+        HealthLogger         = require("utils/HealthLogger");
+    
+    var SupportedEncodingsText = require("text!supported-encodings.json"),
+        SupportedEncodings = JSON.parse(SupportedEncodingsText);
 
     /* StatusBar indicators */
     var languageSelect, // this is a DropdownButton instance
+        encodingSelect, // this is a DropdownButton instance
         $cursorInfo,
         $fileInfo,
         $indentType,
@@ -74,12 +89,22 @@ define(function (require, exports, module) {
         var doc = editor.document,
             lang = doc.getLanguage();
 
-        // Ensure width isn't left locked by a previous click of the dropdown (which may not have resulted in a "change" event at the time)
-        languageSelect.$button.css("width", "auto");
-        // Setting Untitled documents to non-text mode isn't supported yet, so disable the switcher in that case for now
-        languageSelect.$button.prop("disabled", doc.isUntitled());
         // Show the current language as button title
         languageSelect.$button.text(lang.getName());
+    }
+
+    /**
+     * Update encoding
+     * @param {Editor} editor Current editor
+     */
+    function _updateEncodingInfo(editor) {
+        var doc = editor.document;
+
+        // Show the current encoding as button title
+        if (!doc.file._encoding) {
+            doc.file._encoding = "UTF-8";
+        }
+        encodingSelect.$button.text(doc.file._encoding);
     }
 
     /**
@@ -150,6 +175,13 @@ define(function (require, exports, module) {
             selStr = "";
 
         if (sels.length > 1) {
+            //Send analytics data for multicursor use
+            HealthLogger.sendAnalyticsData(
+                "multiCursor",
+                "usage",
+                "multiCursor",
+                "use"
+            );
             selStr = StringUtils.format(Strings.STATUSBAR_SELECTION_MULTIPLE, sels.length);
         } else if (editor.hasSelection()) {
             var sel = sels[0];
@@ -279,6 +311,7 @@ define(function (require, exports, module) {
 
             _updateCursorInfo(null, current);
             _updateLanguageInfo(current);
+            _updateEncodingInfo(current);
             _updateFileInfo(current);
             _initOverwriteMode(current);
             _updateIndentType(fullPath);
@@ -305,6 +338,40 @@ define(function (require, exports, module) {
         // Add option to top of menu for persisting the override
         languageSelect.items.unshift("---");
         languageSelect.items.unshift(LANGUAGE_SET_AS_DEFAULT);
+    }
+
+    /**
+     * Change the encoding and reload the current document.
+     * If passed then save the preferred encoding in state.
+     */
+    function _changeEncodingAndReloadDoc(document) {
+        var promise = document.reload();
+        promise.done(function (text, readTimestamp) {
+            encodingSelect.$button.text(document.file._encoding);
+            // Store the preferred encoding in the state
+            var projectRoot = ProjectManager.getProjectRoot(),
+                context = {
+                    location : {
+                        scope: "user",
+                        layer: "project",
+                        layerID: projectRoot.fullPath
+                    }
+                };
+            var encoding = PreferencesManager.getViewState("encoding", context);
+            encoding[document.file.fullPath] = document.file._encoding;
+            PreferencesManager.setViewState("encoding", encoding, context);
+        });
+        promise.fail(function (error) {
+            console.log("Error reloading contents of " + document.file.fullPath, error);
+        });
+    }
+
+
+    /**
+     * Populate the encodingSelect DropdownButton's menu with all registered encodings
+     */
+    function _populateEncodingDropdown() {
+        encodingSelect.items = SupportedEncodings;
     }
 
     /**
@@ -345,6 +412,27 @@ define(function (require, exports, module) {
         $("#status-language").append(languageSelect.$button);
         languageSelect.$button.attr("title", Strings.STATUSBAR_LANG_TOOLTIP);
 
+
+        encodingSelect = new DropdownButton("", [], function (item, index) {
+            var document = EditorManager.getActiveEditor().document;
+            var html = _.escape(item);
+
+            // Show indicators for currently selected & default languages for the current file
+            if (item === "UTF-8") {
+                html += " <span class='default-language'>" + Strings.STATUSBAR_DEFAULT_LANG + "</span>";
+            }
+            if (item === document.file._encoding) {
+                html = "<span class='checked-language'></span>" + html;
+            }
+            return html;
+        });
+
+        encodingSelect.dropdownExtraClasses = "dropdown-status-bar";
+        encodingSelect.$button.addClass("btn-status-bar");
+        $("#status-encoding").append(encodingSelect.$button);
+        encodingSelect.$button.attr("title", Strings.STATUSBAR_ENCODING_TOOLTIP);
+
+
         // indentation event handlers
         $indentType.on("click", _toggleIndentType);
         $indentWidthLabel
@@ -377,6 +465,18 @@ define(function (require, exports, module) {
             var document = EditorManager.getActiveEditor().document,
                 fullPath = document.file.fullPath;
 
+            var fileType = (document.file instanceof InMemoryFile) ? "newFile" : "existingFile",
+                filelanguageName = lang ? lang._name : "";
+
+            HealthLogger.sendAnalyticsData(
+                HealthLogger.commonStrings.USAGE + HealthLogger.commonStrings.LANGUAGE_CHANGE
+                + filelanguageName + fileType,
+                HealthLogger.commonStrings.USAGE,
+                HealthLogger.commonStrings.LANGUAGE_CHANGE,
+                filelanguageName.toLowerCase(),
+                fileType
+            );
+
             if (lang === LANGUAGE_SET_AS_DEFAULT) {
                 // Set file's current language in preferences as a file extension override (only enabled if not default already)
                 var fileExtensionMap = PreferencesManager.get("language.fileExtensions");
@@ -391,16 +491,80 @@ define(function (require, exports, module) {
             }
         });
 
+        // Encoding select change handler
+        encodingSelect.on("select", function (e, encoding) {
+            var document = EditorManager.getActiveEditor().document,
+                originalPath = document.file.fullPath,
+                originalEncoding = document.file._encoding;
+
+            document.file._encoding = encoding;
+            if (!(document.file instanceof InMemoryFile) && document.isDirty) {
+                CommandManager.execute(Commands.FILE_SAVE_AS, {doc: document}).done(function () {
+                    var doc = DocumentManager.getCurrentDocument();
+                    if (originalPath === doc.file.fullPath) {
+                        _changeEncodingAndReloadDoc(doc);
+                    } else {
+                        document.file._encoding = originalEncoding;
+                    }
+                }).fail(function () {
+                    document.file._encoding = originalEncoding;
+                });
+            } else if (document.file instanceof InMemoryFile) {
+                encodingSelect.$button.text(encoding);
+            } else if (!document.isDirty) {
+                _changeEncodingAndReloadDoc(document);
+            }
+        });
+
         $statusOverwrite.on("click", _updateEditorOverwriteMode);
     }
 
     // Initialize: status bar focused listener
     EditorManager.on("activeEditorChange", _onActiveEditorChange);
 
+    function _checkFileExistance(filePath, index, encoding) {
+        var deferred = new $.Deferred(),
+            fileEntry = FileSystem.getFileForPath(filePath);
+    
+        fileEntry.exists(function (err, exists) {
+            if (!err && exists) {
+                deferred.resolve();
+            } else {
+                delete encoding[filePath];
+                deferred.reject();
+            }
+        });
+
+        return deferred.promise();
+    }
+
+    ProjectManager.on("projectOpen", function () {
+        var projectRoot = ProjectManager.getProjectRoot(),
+            context = {
+                location : {
+                    scope: "user",
+                    layer: "project",
+                    layerID: projectRoot.fullPath
+                }
+            };
+        var encoding = PreferencesManager.getViewState("encoding", context);
+        if (!encoding) {
+            encoding = {};
+            PreferencesManager.setViewState("encoding", encoding, context);
+        }
+        Async.doSequentially(Object.keys(encoding), function (filePath, index) {
+            return _checkFileExistance(filePath, index, encoding);
+        }, false)
+            .always(function () {
+                PreferencesManager.setViewState("encoding", encoding, context);
+            });
+    });
+
     AppInit.htmlReady(_init);
     AppInit.appReady(function () {
         // Populate language switcher with all languages after startup; update it later if this set changes
         _populateLanguageDropdown();
+        _populateEncodingDropdown();
         LanguageManager.on("languageAdded languageModified", _populateLanguageDropdown);
         _onActiveEditorChange(null, EditorManager.getActiveEditor(), null);
         StatusBar.show();

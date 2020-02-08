@@ -343,9 +343,7 @@ define(function (require, exports, module) {
         if (!_traversingFileList) {
             pane.makeViewMostRecent(file);
 
-            index = _.findIndex(_mruList, function (record) {
-                return (record.file === file && record.paneId === pane.id);
-            });
+            index = _findFileInMRUList(pane.id, file);
 
             entry = _makeMRUListEntry(file, pane.id);
 
@@ -1271,22 +1269,26 @@ define(function (require, exports, module) {
                 }
             });
         } else {
-            DocumentManager.getDocumentForPath(file.fullPath)
+            DocumentManager.getDocumentForPath(file.fullPath, file)
                 .done(function (doc) {
-                    _edit(paneId, doc, $.extend({}, options, {
-                        noPaneActivate: true
-                    }));
-                    doPostOpenActivation();
-                    result.resolve(doc.file);
+                    if (doc) {
+                        _edit(paneId, doc, $.extend({}, options, {
+                            noPaneActivate: true
+                        }));
+                        doPostOpenActivation();
+                        result.resolve(doc.file);
+                    } else {
+                        result.resolve(null);
+                    }
                 })
                 .fail(function (fileError) {
                     result.reject(fileError);
                 });
         }
 
-        result.done(function () {
-            _makeFileMostRecent(paneId, file);
-        });
+       result.done(function () {
+           _makeFileMostRecent(paneId, file);
+       });
 
         return result;
     }
